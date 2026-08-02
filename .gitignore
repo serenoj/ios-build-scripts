@@ -1,0 +1,12 @@
+# Generated for GitHub publication
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+.claude/
+*.log
+

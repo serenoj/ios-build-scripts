@@ -1,0 +1,173 @@
+# Example Bitrise config for MyApp using ios-build-scripts.
+#
+# Assumptions:
+#   - Repo root is the Xcode project root (PROJECT_ROOT).
+#   - scripts/ was copied from this package (scripts/archive, scripts/build, …).
+#   - Secrets (Bitrise UI → Secrets): FIREBASE_TOKEN, FIREBASE_APP_ID
+#   - Stack has Xcode + a base simulator named UnitTestDevice15 (or override).
+#
+# Copy into your app as bitrise.yml and adjust schemes, simulator, and stack.
+
+format_version: "13"
+default_step_lib_source: https://github.com/bitrise-io/bitrise-steplib.git
+
+project_type: ios
+
+app:
+  envs:
+    - opts:
+        is_expand: false
+      APPLICATION_NAME: MyApp
+    - opts:
+        is_expand: false
+      PROJECT_NAME: MyApp.xcodeproj
+    - opts:
+        is_expand: false
+      SCHEME_NAME: MyApp
+    - opts:
+        is_expand: false
+      TEST_SCHEME: MyAppTests
+    - opts:
+        is_expand: false
+      TEST_DEVICE: UnitTestDevice15
+    - opts:
+        is_expand: false
+      BASE_SIM: UnitTestDevice15
+    - opts:
+        is_expand: false
+      SIM_OS: "15.0"
+    - opts:
+        is_expand: false
+      FIREBASE_GROUPS: ios_testers
+    # Prefer Bitrise Secrets for tokens; listed here only as documentation.
+    # - FIREBASE_TOKEN: <secret>
+    # - FIREBASE_APP_ID: <secret or app env>
+
+meta:
+  bitrise.io:
+    stack: osx-xcode-15.0.x
+    machine_type_id: g2-m1.4core
+
+trigger_map:
+  - push_branch: main
+    workflow: primary
+  - pull_request_source_branch: "*"
+    workflow: primary
+  - tag: "automation/*"
+    workflow: automation_build
+  - tag: "release/*"
+    workflow: distribute
+
+workflows:
+  _setup:
+    steps:
+      - activate-ssh-key@4:
+          run_if: '{{getenv "SSH_RSA_PRIVATE_KEY" | ne ""}}'
+      - git-clone@8: {}
+      - certificate-and-profile-installer@1: {}
+      - script@1:
+          title: Install tooling (xcpretty, Firebase CLI)
+          inputs:
+            - content: |-
+                #!/usr/bin/env bash
+                set -euo pipefail
+                gem install xcpretty --no-document || true
+                if ! command -v firebase >/dev/null 2>&1; then
+                  curl -sL https://firebase.tools | bash
+                fi
+                firebase --version || true
+                xcpretty --version || true
+      - script@1:
+          title: Ensure base simulator exists
+          inputs:
+            - content: |-
+                #!/usr/bin/env bash
+                set -euo pipefail
+                # Create only if missing. Adjust device type / runtime for your stack.
+                if ! xcrun simctl list devices | grep -q "${TEST_DEVICE}"; then
+                  echo "Creating simulator ${TEST_DEVICE}..."
+                  xcrun simctl create "${TEST_DEVICE}" \
+                    "iPhone 14" \
+                    "com.apple.CoreSimulator.SimRuntime.iOS-15-0" || true
+                fi
+                xcrun simctl list devices available | grep -E "${TEST_DEVICE}|${BASE_SIM}" || true
+
+  primary:
+    description: Unit tests (PR / main). Uses scripts/build/runUnitTests.sh
+    before_run:
+      - _setup
+    steps:
+      - script@1:
+          title: Run unit tests
+          inputs:
+            - content: |-
+                #!/usr/bin/env bash
+                set -euo pipefail
+                export PROJECT_ROOT="${BITRISE_SOURCE_DIR}"
+                export APPLICATION_NAME
+                export PROJECT_NAME
+                export SCHEME_NAME="${TEST_SCHEME}"
+                export TEST_DEVICE
+                export SIM_OS
+                export TEMP_SIM=true
+                export XCPRETTY=true
+                export SLATHER=false
+                chmod +x "${PROJECT_ROOT}/scripts/build/runUnitTests.sh"
+                "${PROJECT_ROOT}/scripts/build/runUnitTests.sh"
+      - deploy-to-bitrise-io@2:
+          is_always_run: true
+          inputs:
+            - deploy_path: "${BITRISE_SOURCE_DIR}/DerivedData/Build/reports"
+            - is_compress: "true"
+
+  automation_build:
+    description: Debug .app zip for UI automation pipelines
+    before_run:
+      - _setup
+    steps:
+      - script@1:
+          title: Automation Debug build + zip
+          inputs:
+            - content: |-
+                #!/usr/bin/env bash
+                set -euo pipefail
+                export PROJECT_ROOT="${BITRISE_SOURCE_DIR}"
+                export APPLICATION_NAME
+                export PROJECT_NAME
+                export SCHEME_NAME
+                export BASE_SIM
+                export SIM_OS
+                chmod +x "${PROJECT_ROOT}/scripts/build/automationBuild.sh"
+                "${PROJECT_ROOT}/scripts/build/automationBuild.sh"
+      - deploy-to-bitrise-io@2:
+          inputs:
+            - deploy_path: "${BITRISE_SOURCE_DIR}/scripts/build/build"
+            - is_compress: "true"
+
+  distribute:
+    description: Release archive → Ad-Hoc IPA → Firebase App Distribution + dSYMs
+    before_run:
+      - _setup
+    steps:
+      - script@1:
+          title: Archive and distribute
+          inputs:
+            - content: |-
+                #!/usr/bin/env bash
+                set -euo pipefail
+                : "${FIREBASE_TOKEN:?Set FIREBASE_TOKEN secret}"
+                : "${FIREBASE_APP_ID:?Set FIREBASE_APP_ID secret or env}"
+                export PROJECT_ROOT="${BITRISE_SOURCE_DIR}"
+                export APPLICATION_NAME
+                export PROJECT_NAME
+                export SCHEME_NAME
+                export FIREBASE_TOKEN
+                export FIREBASE_APP_ID
+                export FIREBASE_GROUPS
+                chmod +x "${PROJECT_ROOT}/scripts/archive/appArchive.sh"
+                "${PROJECT_ROOT}/scripts/archive/appArchive.sh"
+      - deploy-to-bitrise-io@2:
+          is_always_run: true
+          inputs:
+            - deploy_path: "${BITRISE_SOURCE_DIR}/scripts/archive/distribution"
+            - is_compress: "true"
